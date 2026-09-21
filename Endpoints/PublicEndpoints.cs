@@ -1,0 +1,61 @@
+using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using OnMe.Api.Data;
+using OnMe.Api.Dtos;
+using OnMe.Api.Models;
+
+namespace OnMe.Api.Endpoints;
+
+public static class PublicEndpoints
+{
+    private static readonly string[] AllowedLocations = ["inside_saudi", "outside_saudi", "unsure"];
+
+    public static void MapPublic(this WebApplication app)
+    {
+        // إرسال طلب جديد — عام مع RateLimiting
+        app.MapPost("/api/leads", async ([FromBody] CreateLeadDto dto, AppDbContext db) =>
+        {
+            if (string.IsNullOrWhiteSpace(dto.Name) || dto.Name.Trim().Length < 2 || dto.Name.Trim().Length > 120)
+                return Results.BadRequest(new { message = "Name must be 2-120 characters." });
+            if (!Regex.IsMatch((dto.Phone ?? "").Trim(), @"^05\d{8}$"))
+                return Results.BadRequest(new { message = "Phone must match 05XXXXXXXX." });
+            if (string.IsNullOrWhiteSpace(dto.Description) || dto.Description.Trim().Length < 10 || dto.Description.Trim().Length > 5000)
+                return Results.BadRequest(new { message = "Description must be 10-5000 characters." });
+            var location = string.IsNullOrWhiteSpace(dto.Location) ? null : dto.Location.Trim();
+            if (location is not null && !AllowedLocations.Contains(location))
+                return Results.BadRequest(new { message = "Invalid location value." });
+
+            var lead = new Lead
+            {
+                Name = dto.Name.Trim(),
+                Phone = dto.Phone.Trim(),
+                Description = dto.Description.Trim(),
+                Location = location,
+                Status = LeadStatuses.New,
+                RefCode = "OM-" + DateTime.UtcNow.ToString("yyyyMMdd") + "-" + Random.Shared.Next(1000, 9999),
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            };
+            db.Leads.Add(lead);
+            await db.SaveChangesAsync();
+            return Results.Created($"/api/admin/leads/{lead.Id}", new { id = lead.Id, @ref = lead.RefCode });
+        })
+        .RequireRateLimiting("leads")
+        .WithName("CreateLead")
+        .WithSummary("Submit a new task request");
+
+        // قراءة المحتوى العام (للواجهة المستقبلية المرتبطة بالـ CMS)
+        app.MapGet("/api/content", async (AppDbContext db) => Results.Ok(new
+        {
+            sections = await db.PageSections.Where(s => s.IsEnabled).OrderBy(s => s.SortOrder).ToListAsync(),
+            services = await db.Services.Where(s => s.IsEnabled).OrderBy(s => s.SortOrder).ToListAsync(),
+            steps = await db.ProcessSteps.Where(s => s.IsEnabled).OrderBy(s => s.SortOrder).ToListAsync(),
+            faqs = await db.FaqItems.Where(s => s.IsEnabled).OrderBy(s => s.SortOrder).ToListAsync(),
+            examples = await db.TaskExamples.Where(s => s.IsEnabled).OrderBy(s => s.SortOrder).ToListAsync(),
+            settings = await db.SiteSettings.ToDictionaryAsync(s => s.Key, s => s.Value)
+        }));
+
+        app.MapGet("/api/health", () => Results.Ok(new { ok = true, time = DateTime.UtcNow }));
+    }
+}
